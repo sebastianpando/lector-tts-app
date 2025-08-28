@@ -1,4 +1,4 @@
 flask
 gTTS
-pydub
 gunicorn
+requests
