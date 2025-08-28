@@ -108,3 +108,39 @@ def api_delete():
 if __name__ == "__main__":
     # Render usará gunicorn, pero esto permite correr localmente:
     app.run(host="0.0.0.0", port=8000, debug=False)
+
+# 1) ARRIBA: cambia el tamaño de chunk a ~2800–3000 chars para menos viajes a gTTS
+def split_text(text: str, max_chars: int = 2800):  # antes 1800
+    import re
+    text = re.sub(r"\s+", " ", text).strip()
+    parts = []
+    while text:
+        if len(text) <= max_chars:
+            parts.append(text); break
+        cut = text.rfind(". ", 0, max_chars)
+        if cut == -1: cut = text.rfind(" ", 0, max_chars)
+        if cut == -1: cut = max_chars
+        parts.append(text[:cut+1].strip())
+        text = text[cut+1:].strip()
+    return parts
+
+# 2) NUEVO: endpoint que prepara el stream SIN recargar la página
+@app.route("/api/prepare", methods=["POST"])
+def api_prepare():
+    data = request.get_json(silent=True) or {}
+    title = (data.get("title") or "").strip()
+    text  = (data.get("text")  or "").strip()
+    if not text:
+        return {"ok": False, "error": "Texto vacío."}, 400
+
+    import re
+    words = len(re.findall(r"\b\w+\b", text))
+    if words > MAX_WORDS:
+        return {"ok": False, "error": f"Texto supera {MAX_WORDS} palabras ({words})."}, 400
+
+    token = str(uuid.uuid4())
+    if not title:
+        title = text[:40] + ("…" if len(text) > 40 else "")
+    STREAM_JOBS[token] = {"title": title, "text": text}
+    return {"ok": True, "token": token, "title": title}
+
