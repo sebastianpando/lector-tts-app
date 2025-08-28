@@ -86,3 +86,6 @@ button:disabled { opacity: .6; cursor: not-allowed; }
 
 .help { margin: 28px 0 8px; color: var(--muted); }
 .help code { background: #0b1220; padding: 2px 6px; border-radius: 6px; border: 1px solid var(--border); }
+
+/* Base de estilos opcional. Tu diseño principal está inline en index.html */
+:root { --brand:#3b82f6; }

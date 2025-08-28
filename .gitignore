@@ -1,1 +1,19 @@
-token-github
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+.env
+
+# SO
+.DS_Store
+Thumbs.db
+
+# Audio generado
+audio/*.mp3
+
+# IDE
+.vscode/
+.idea/
