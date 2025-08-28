@@ -66,13 +66,14 @@
 <body>
   <header>
     <pre class="ascii">
-PPPP    AAAA   N   N  DDDD    OOO
-P   P  A    A  NN  N  D   D  O   O
-PPPP   AAAAAA  N N N  D   D  O   O
-P      A    A  N  NN  D   D  O   O
-P      A    A  N   N  DDDD    OOO
+██████╗  █████╗ ███╗   ██╗██████╗  ██████╗ 
+██╔══██╗██╔══██╗████╗  ██║██╔══██╗██╔═══██╗
+██████╔╝███████║██╔██╗ ██║██║  ██║██║   ██║
+██╔═══╝ ██╔══██║██║╚██╗██║██║  ██║██║   ██║
+██║     ██║  ██║██║ ╚████║██████╔╝╚██████╔╝
+╚═╝     ╚═╝  ╚═╝╚═╝  ╚═══╝╚═════╝  ╚═════╝ 
     </pre>
-    <p style="color:#94a3b8;">Lector de texto Español e Inglés. Powered by Atlas 🐶</p>
+    <p style="color:#94a3b8;">Lector en Inglés y Español TTS. Powered by Atlas 🐶</p>
   </header>
 
   <section class="composer">
@@ -88,7 +89,7 @@ P      A    A  N   N  DDDD    OOO
         </select>
       </div>
 
-      <button type="submit" id="submit-btn">🔊 Escuchar ahora</button>
+      <button type="submit">🔊 Reproducir ahora</button>
       <div id="form-error" class="alert error" style="display:none;"></div>
     </form>
   </section>
@@ -103,12 +104,12 @@ P      A    A  N   N  DDDD    OOO
       <div class="progress-bar" id="progress-bar"></div>
     </div>
 
-    <audio id="player" controls preload="auto"></audio>
+    <audio id="player" controls preload="none" playsinline></audio>
 
     <div class="controls">
-      <button id="play" type="button">▶️ Play</button>
-      <button id="pause" type="button">⏸ Pausa</button>
-      <button id="stop" type="button">⏹ Detener</button>
+      <button id="play">▶️ Play</button>
+      <button id="pause">⏸ Pausa</button>
+      <button id="stop">⏹ Detener</button>
 
       <div class="speed">
         <span class="muted">Velocidad:</span>
@@ -129,7 +130,7 @@ P      A    A  N   N  DDDD    OOO
         <li>
           <button class="play" data-file="{{ it }}">▶</button>
           <a href="/audio/{{ it }}">{{ it }}</a>
-          <button class="del" data-file="{{ it }}">🗑</button>
+          <!-- botón borrar opcional si implementas /api/delete -->
         </li>
         {% endfor %}
       </ul>

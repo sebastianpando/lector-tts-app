@@ -1,227 +1,180 @@
 import os
-import re
-import io
-import time
 import uuid
-import shutil
+import re
 from datetime import datetime
-from typing import List, Generator
-
-from flask import Flask, render_template, request, Response, send_from_directory, jsonify, abort
-
+from flask import Flask, request, send_from_directory, jsonify, render_template, make_response
 from gtts import gTTS
 
-# --- Config ---
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-AUDIO_DIR = os.path.join(BASE_DIR, "audio")
-STATIC_DIR = os.path.join(BASE_DIR, "static")
-TEMPLATES_DIR = os.path.join(BASE_DIR, "templates")
-
+APP_ROOT = os.path.dirname(os.path.abspath(__file__))
+AUDIO_DIR = os.path.join(APP_ROOT, "audio")
 os.makedirs(AUDIO_DIR, exist_ok=True)
-os.makedirs(STATIC_DIR, exist_ok=True)
-os.makedirs(TEMPLATES_DIR, exist_ok=True)
 
-# Máximo de archivos a conservar en el archivo local (y mostrar en UI)
-ARCHIVE_MAX = 3
-
-# Cache temporal en memoria para poder hacer GET de /stream/<token>
-CACHE = {}  # token -> {"text": str, "lang": "es|en", "ts": float}
+# Sesiones en memoria: { session_id: {"lang": "es", "chunks": [str, ...]} }
+SESSIONS = {}
 
 app = Flask(__name__, static_url_path="/static", static_folder="static", template_folder="templates")
 
+# ---------- Utilidades ----------
 
-# --------- Utilidades ---------
-def _sanitize_filename(name: str) -> str:
-    name = re.sub(r"[^A-Za-z0-9._-]+", "_", name)
-    return name[:120]
-
-
-def _list_audio_sorted() -> List[str]:
-    files = [f for f in os.listdir(AUDIO_DIR) if f.lower().endswith(".mp3")]
-    files.sort(key=lambda fn: os.path.getmtime(os.path.join(AUDIO_DIR, fn)), reverse=True)
-    return files
-
-
-def _enforce_archive_limit():
-    files = _list_audio_sorted()
-    for f in files[ARCHIVE_MAX:]:
-        try:
-            os.remove(os.path.join(AUDIO_DIR, f))
-        except Exception:
-            pass
-
-
-def _split_text(text: str, max_len: int = 220) -> List[str]:
+def split_text_for_tts(txt: str, max_chars=240):
     """
-    Partimos el texto en trozos aptos para gTTS, priorizando límites por oraciones,
-    pero asegurando un largo acotado. Así podemos 'streamear' concatenando MP3.
+    Divide el texto en segmentos amigables para TTS.
+    Preferimos cortar por punto/fin de oración; si no, por longitud.
     """
-    text = re.sub(r"\s+", " ", text).strip()
-    if not text:
+    txt = txt.strip()
+    if not txt:
         return []
 
-    # Primero, cortar por oraciones “suaves”
-    raw_parts = re.split(r"(?<=[\.\!\?\;…])\s+", text)
-    chunks: List[str] = []
+    # Primero intenta dividir por oraciones
+    parts = re.split(r'(?<=[\.\!\?])\s+', txt)
+    chunks = []
     buf = ""
-    for part in raw_parts:
-        if not part:
+
+    for p in parts:
+        if not p:
             continue
-        candidate = (buf + " " + part).strip() if buf else part
-        if len(candidate) <= max_len:
+        candidate = (buf + " " + p).strip() if buf else p
+        if len(candidate) <= max_chars:
             buf = candidate
         else:
             if buf:
                 chunks.append(buf)
-            # si el part es muy largo, forzamos subcortes duros
-            while len(part) > max_len:
-                # cortar en espacio más cercano antes de max_len
-                cut = part.rfind(" ", 0, max_len)
-                if cut == -1:
-                    cut = max_len
-                chunks.append(part[:cut].strip())
-                part = part[cut:].strip()
-            if part:
-                buf = part
+            # si p es muy largo, lo troceamos duro
+            while len(p) > max_chars:
+                cut = p[:max_chars]
+                # evita cortar palabras largas si se puede
+                last_space = cut.rfind(" ")
+                if last_space > 60:
+                    cut = cut[:last_space]
+                chunks.append(cut.strip())
+                p = p[len(cut):].strip()
+            if p:
+                buf = p
             else:
                 buf = ""
     if buf:
-        chunks.append(buf)
-    return chunks
+        chunks.append(buf.strip())
 
+    # Garantiza que no haya vacíos
+    return [c for c in chunks if c]
 
-def _yield_gtts_mp3_chunks(text: str, lang: str) -> Generator[bytes, None, None]:
-    """
-    Genera MP3s trozo a trozo con gTTS y los va emitiendo.
-    Concatenar MP3 es válido: el navegador lo reproduce como un continuo.
-    """
-    chunks = _split_text(text)
-    total = len(chunks)
-    if total == 0:
-        return
+def tts_to_file(text: str, lang: str, out_path: str):
+    tts = gTTS(text=text, lang=lang, slow=False)
+    tts.save(out_path)
 
-    for idx, piece in enumerate(chunks, start=1):
-        # gTTS genera un MP3 por trozo
-        mp3_buf = io.BytesIO()
-        tts = gTTS(text=piece, lang=lang, slow=False)
-        tts.write_to_fp(mp3_buf)
-        mp3_buf.seek(0)
-        data = mp3_buf.read()
-        yield data  # Enviamos inmediatamente este bloque
+def list_audio_files(limit=3):
+    try:
+        files = [f for f in os.listdir(AUDIO_DIR) if f.lower().endswith(".mp3")]
+    except FileNotFoundError:
+        return []
+    files.sort(key=lambda f: os.path.getmtime(os.path.join(AUDIO_DIR, f)), reverse=True)
+    return files[:limit]
 
+def corsify(resp):
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    return resp
 
-# --------- Rutas ---------
+# ---------- Rutas ----------
+
 @app.route("/")
 def index():
-    files = _list_audio_sorted()[:ARCHIVE_MAX]
-    return render_template("index.html", items=files)
-
-
-@app.route("/static/<path:filename>")
-def static_files(filename):
-    return send_from_directory(STATIC_DIR, filename)
-
+    items = list_audio_files(limit=3)
+    return render_template("index.html", items=items)
 
 @app.route("/audio/<path:filename>")
-def audio_files(filename):
-    safe = _sanitize_filename(filename)
-    path = os.path.join(AUDIO_DIR, safe)
-    if not os.path.isfile(path):
-        abort(404)
-    return send_from_directory(AUDIO_DIR, safe, mimetype="audio/mpeg", as_attachment=False)
+def audio_file(filename):
+    # Archivos exportados completos (no los segmentados)
+    resp = make_response(send_from_directory(AUDIO_DIR, filename, mimetype="audio/mpeg", as_attachment=False))
+    resp.headers["Accept-Ranges"] = "bytes"
+    resp.headers["Content-Type"] = "audio/mpeg"
+    resp.headers["Cache-Control"] = "public, max-age=31536000, no-transform"
+    return corsify(resp)
 
+@app.route("/api/manifest", methods=["POST", "OPTIONS"])
+def api_manifest():
+    if request.method == "OPTIONS":
+        return corsify(make_response(("", 204)))
 
-@app.route("/api/cache-text", methods=["POST"])
-def api_cache_text():
-    """
-    Recibe {text, lang} y retorna un token para que el <audio> haga GET /stream/<token>.
-    Esto evita URLs gigantes y permite streaming GET.
-    """
     data = request.get_json(silent=True) or {}
     text = (data.get("text") or "").strip()
-    lang = (data.get("lang") or "es").lower()
-    if lang not in ("es", "en"):
-        lang = "es"
-
+    lang = data.get("lang") or "es"
     if not text:
-        return jsonify({"ok": False, "error": "Texto vacío."}), 400
+        return corsify(make_response(jsonify({"error": "Texto vacío"}), 400))
 
-    token = uuid.uuid4().hex
-    CACHE[token] = {"text": text, "lang": lang, "ts": time.time()}
-    # limpieza básica del cache (5 min)
-    now = time.time()
-    for k, v in list(CACHE.items()):
-        if now - v.get("ts", now) > 300:
-            CACHE.pop(k, None)
+    chunks = split_text_for_tts(text, max_chars=240)
+    if not chunks:
+        return corsify(make_response(jsonify({"error": "No hay contenido utilizable"}), 400))
 
-    return jsonify({"ok": True, "token": token})
+    session_id = uuid.uuid4().hex
+    SESSIONS[session_id] = {"lang": lang, "chunks": chunks}
 
+    # Devolvemos la cola de reproducción (referencias por índice)
+    manifest = {
+        "session": session_id,
+        "count": len(chunks),
+        "lang": lang,
+        "chunks": list(range(len(chunks)))
+    }
+    return corsify(make_response(jsonify(manifest), 200))
 
-@app.route("/stream/<token>")
-def stream_audio(token):
-    """
-    Stream de audio/mpeg por chunks gTTS.
-    Mientras streameamos, también vamos acumulando en un archivo final
-    y al terminar lo agregamos al archivo local (limitado a ARCHIVE_MAX).
-    """
-    info = CACHE.pop(token, None)
+@app.route("/api/chunk/<session_id>/<int:idx>")
+def api_chunk(session_id, idx):
+    info = SESSIONS.get(session_id)
     if not info:
-        return abort(404)
-
-    text = info["text"]
+        return corsify(make_response(jsonify({"error": "Sesión no encontrada"}), 404))
+    chunks = info["chunks"]
     lang = info["lang"]
 
-    # generamos un nombre destino con timestamp
-    ts = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
-    safe_prefix = _sanitize_filename(text[:40]) or f"tts_{ts}"
-    filename = f"{safe_prefix}_{ts}.mp3"
-    tmp_path = os.path.join(AUDIO_DIR, f".tmp_{uuid.uuid4().hex}.mp3")
-    final_path = os.path.join(AUDIO_DIR, filename)
+    if idx < 0 or idx >= len(chunks):
+        return corsify(make_response(jsonify({"error": "Índice fuera de rango"}), 400))
 
-    def generate():
-        # Vamos teendo los bytes al archivo mientras también los emitimos
-        with open(tmp_path, "wb") as out:
-            for block in _yield_gtts_mp3_chunks(text, lang):
-                out.write(block)
-                out.flush()
-                yield block
-
-        # Terminado el stream, movemos a final y limpiamos archivo viejo si sobra
+    # Genera el mp3 del segmento a demanda (cache simple en disco por si se repite)
+    safe_name = f"{session_id}_{idx}.mp3"
+    out_path = os.path.join(AUDIO_DIR, safe_name)
+    if not os.path.exists(out_path):
         try:
-            shutil.move(tmp_path, final_path)
-        except Exception:
-            # como fallback, intentamos copiar y borrar
-            try:
-                shutil.copyfile(tmp_path, final_path)
-            finally:
-                try:
-                    os.remove(tmp_path)
-                except Exception:
-                    pass
-
-        # Enforce to 3 últimos
-        _enforce_archive_limit()
-
-    # Importante: no usar Content-Length para permitir chunked
-    return Response(generate(), mimetype="audio/mpeg", direct_passthrough=True)
-
-
-@app.route("/api/delete", methods=["POST"])
-def api_delete():
-    data = request.get_json(silent=True) or {}
-    fname = _sanitize_filename((data.get("file") or "").strip())
-    if not fname:
-        return jsonify({"ok": False, "error": "Archivo inválido."}), 400
-    fpath = os.path.join(AUDIO_DIR, fname)
-    if os.path.isfile(fpath):
-        try:
-            os.remove(fpath)
+            tts_to_file(chunks[idx], lang, out_path)
         except Exception as e:
-            return jsonify({"ok": False, "error": str(e)}), 500
-        return jsonify({"ok": True})
-    return jsonify({"ok": False, "error": "No existe."}), 404
+            return corsify(make_response(jsonify({"error": f"Fallo TTS: {e}"}), 500))
 
+    resp = make_response(send_from_directory(AUDIO_DIR, safe_name, mimetype="audio/mpeg", as_attachment=False))
+    resp.headers["Accept-Ranges"] = "bytes"
+    resp.headers["Content-Type"] = "audio/mpeg"
+    resp.headers["Cache-Control"] = "no-store"
+    return corsify(resp)
+
+@app.route("/api/export", methods=["POST", "OPTIONS"])
+def api_export():
+    """
+    Exporta TODO el texto en un solo MP3, útil para descargar/archivar cuando se terminó de escuchar.
+    """
+    if request.method == "OPTIONS":
+        return corsify(make_response(("", 204)))
+
+    data = request.get_json(silent=True) or {}
+    text = (data.get("text") or "").strip()
+    lang = data.get("lang") or "es"
+    if not text:
+        return corsify(make_response(jsonify({"error": "Texto vacío"}), 400))
+
+    ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    fname = f"tts_{lang}_{ts}.mp3"
+    out_path = os.path.join(AUDIO_DIR, fname)
+
+    try:
+        tts_to_file(text, lang, out_path)
+    except Exception as e:
+        return corsify(make_response(jsonify({"error": f"Fallo TTS: {e}"}), 500))
+
+    return corsify(make_response(jsonify({"file": fname, "url": f"/audio/{fname}"}), 200))
+
+# Ping CORS
+@app.after_request
+def add_cors(resp):
+    return corsify(resp)
 
 if __name__ == "__main__":
-    # Para correr local: python app.py
+    # Desarrollo local
     app.run(host="0.0.0.0", port=5000, debug=True)

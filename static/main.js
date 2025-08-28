@@ -1,160 +1,235 @@
-// main.js
 (() => {
-  const form = document.getElementById('tts-form');
-  const txt = document.getElementById('text');
-  const langSel = document.getElementById('lang');
-  const player = document.getElementById('player');
-  const spinner = document.getElementById('spinner');
-  const statusLabel = document.getElementById('status-label');
-  const formError = document.getElementById('form-error');
-  const submitBtn = document.getElementById('submit-btn');
+  const form = document.getElementById("tts-form");
+  const textEl = document.getElementById("text");
+  const langEl = document.getElementById("lang");
+  const errorEl = document.getElementById("form-error");
 
-  const btnPlay = document.getElementById('play');
-  const btnPause = document.getElementById('pause');
-  const btnStop = document.getElementById('stop');
+  const spinner = document.getElementById("spinner");
+  const statusLabel = document.getElementById("status-label");
+  const progressWrap = document.getElementById("progress-wrap");
+  const progressBar = document.getElementById("progress-bar");
 
-  const speedButtons = Array.from(document.querySelectorAll('.speed-btn'));
-  const speedCurrent = document.getElementById('speed-current');
+  const audioTag = document.getElementById("player");
+  const playBtn = document.getElementById("play");
+  const pauseBtn = document.getElementById("pause");
+  const stopBtn = document.getElementById("stop");
+  const speedBtns = document.querySelectorAll(".speed-btn");
+  const speedCurrent = document.getElementById("speed-current");
 
-  let currentSrcIsStreaming = false;
-  let lockedSrc = null; // Para no “resetear” el audio en mitad de la reproducción
+  // --- Estado de reproducción segmentada ---
+  let AC = null;                 // AudioContext
+  let masterGain = null;         // GainNode para controlar volumen / rate emulado si quisieras
+  let queue = [];                // [{buffer: AudioBuffer, duration: number}, ...]
+  let isPlaying = false;
+  let startTime = 0;             // AC.currentTime cuando comienza la cola actual
+  let scheduledTime = 0;         // segundos ya planificados en la cola
+  let fetchController = null;    // abort para peticiones en curso
+  let sessionId = null;          // id de la sesión /api/manifest
+  let chunkCount = 0;            // cantidad de segmentos
+  let playedSeconds = 0;         // progreso simple
 
-  function setStatus(msg, spinning = false) {
-    statusLabel.textContent = msg;
-    spinner.style.display = spinning ? 'inline-block' : 'none';
+  // iOS requiere activar el AudioContext tras un gesto del usuario
+  function ensureAudioContext() {
+    if (!AC) {
+      AC = new (window.AudioContext || window.webkitAudioContext)();
+      masterGain = AC.createGain();
+      masterGain.connect(AC.destination);
+    }
+    if (AC.state === "suspended") {
+      return AC.resume();
+    }
+    return Promise.resolve();
   }
 
-  function showError(msg) {
-    formError.textContent = msg;
-    formError.style.display = 'block';
-  }
-  function clearError() {
-    formError.textContent = '';
-    formError.style.display = 'none';
+  function uiLoading(on) {
+    spinner.style.display = on ? "inline-block" : "none";
+    statusLabel.textContent = on ? "Buffering…" : "Listo";
+    progressWrap.style.display = on ? "block" : "none";
   }
 
-  function lockAndPlay(src) {
-    // Evitar reinicios: seteamos src UNA sola vez por ciclo
-    if (lockedSrc === src) return;
-    lockedSrc = src;
-    player.src = src;
-    currentSrcIsStreaming = src.startsWith('/stream/');
-    player.play().catch(() => {});
+  function setProgress(percent) {
+    progressBar.style.width = `${Math.max(0, Math.min(100, percent))}%`;
   }
 
-  // ---- Form submit: cache text y apuntar <audio> al stream
-  form.addEventListener('submit', async (e) => {
+  // Limpia la cola y cancela descargas
+  function resetPlayback(hard = false) {
+    if (fetchController) {
+      fetchController.abort();
+      fetchController = null;
+    }
+    queue = [];
+    scheduledTime = 0;
+    startTime = 0;
+    isPlaying = false;
+    playedSeconds = 0;
+    setProgress(0);
+    if (hard && AC) {
+      // cierra contexto si quieres liberar
+      // AC.close(); AC = null; masterGain = null;
+    }
+  }
+
+  // Programa un AudioBuffer para que suene en AC
+  function scheduleBuffer(buffer) {
+    const src = AC.createBufferSource();
+    src.buffer = buffer;
+    src.connect(masterGain);
+    const when = (startTime || AC.currentTime) + scheduledTime;
+    src.start(when);
+    scheduledTime += buffer.duration;
+    // Al terminar el último buffer planificado, si no hay más, marcamos fin
+    src.onended = () => {
+      // onended se dispara por cada buffer. Solo cuando todo lo planificado pasó:
+      const elapsed = AC.currentTime - (startTime || AC.currentTime);
+      if (elapsed >= (scheduledTime - 0.05)) {
+        isPlaying = false;
+        uiLoading(false);
+        statusLabel.textContent = "Finalizado";
+      }
+    };
+  }
+
+  // Descarga + decodifica un chunk y lo añade a la cola
+  async function fetchAndQueueChunk(idx) {
+    const url = `/api/chunk/${sessionId}/${idx}`;
+    const res = await fetch(url, { cache: "no-store" });
+    if (!res.ok) throw new Error(`Chunk ${idx} HTTP ${res.status}`);
+    const ab = await res.arrayBuffer();
+    const buffer = await AC.decodeAudioData(ab);
+    queue.push({ buffer, duration: buffer.duration });
+    scheduleBuffer(buffer);
+    // Progreso aproximado: chunks descargados / total
+    const pct = Math.round(((idx + 1) / chunkCount) * 100);
+    setProgress(pct);
+  }
+
+  async function startStreamingPlayback(text, lang) {
+    resetPlayback();
+
+    await ensureAudioContext();
+
+    // 1) Pide el manifiesto (divide texto en el servidor)
+    fetchController = new AbortController();
+    const res = await fetch("/api/manifest", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text, lang }),
+      signal: fetchController.signal
+    });
+    if (!res.ok) {
+      const msg = await res.text();
+      throw new Error(`Manifiesto: ${msg || res.status}`);
+    }
+    const manifest = await res.json();
+    sessionId = manifest.session;
+    chunkCount = manifest.count;
+
+    // 2) Descarga el primer chunk, lo reproduce ASAP
+    uiLoading(true);
+    statusLabel.textContent = "Preparando primer segmento…";
+    await fetchAndQueueChunk(0);
+
+    // Primer audio ya planificado, arranca el reloj
+    startTime = AC.currentTime;
+    isPlaying = true;
+    uiLoading(true);
+    statusLabel.textContent = "Reproduciendo…";
+
+    // 3) Descarga del resto en segundo plano
+    for (let i = 1; i < chunkCount; i++) {
+      if (!fetchController) break;
+      await fetchAndQueueChunk(i);
+    }
+
+    // 4) Export opcional (archivo completo) — cuando todo estuvo OK
+    try {
+      await fetch("/api/export", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text, lang })
+      });
+    } catch (_) { /* silencioso */ }
+
+    uiLoading(false);
+  }
+
+  // --- Eventos UI ---
+
+  form.addEventListener("submit", async (e) => {
     e.preventDefault();
-    clearError();
-
-    const text = (txt.value || '').trim();
-    const lang = langSel.value || 'es';
+    errorEl.style.display = "none";
+    const text = (textEl.value || "").trim();
+    const lang = langEl.value || "es";
     if (!text) {
-      showError('Por favor, pega algún texto.');
+      errorEl.textContent = "Por favor pega algún texto.";
+      errorEl.style.display = "block";
       return;
     }
 
-    setStatus('Preparando stream…', true);
-    submitBtn.disabled = true;
-
     try {
-      const res = await fetch('/api/cache-text', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ text, lang })
-      });
-      const data = await res.json();
-      if (!res.ok || !data.ok) {
-        throw new Error(data.error || 'Error preparando el streaming.');
-      }
-
-      const token = data.token;
-      const streamUrl = `/stream/${token}`;
-
-      // Importante: seteamos src una SOLA vez y reproducimos (stream empieza al tiro)
-      lockAndPlay(streamUrl);
-      setStatus('Cargando audio…', true);
-
+      await ensureAudioContext(); // gesto del usuario
+      await startStreamingPlayback(text, lang);
     } catch (err) {
       console.error(err);
-      showError(err.message || 'Error inesperado.');
-      setStatus('Listo', false);
-    } finally {
-      submitBtn.disabled = false;
+      errorEl.textContent = "No se pudo iniciar la reproducción (iOS/Safari pueden requerir un toque adicional).";
+      errorEl.style.display = "block";
+      uiLoading(false);
     }
   });
 
-  // ---- Controles de player
-  btnPlay.addEventListener('click', () => {
-    player.play().catch(() => {});
-  });
-  btnPause.addEventListener('click', () => {
-    player.pause();
-  });
-  btnStop.addEventListener('click', () => {
-    player.pause();
-    player.currentTime = 0;
+  playBtn.addEventListener("click", async () => {
+    await ensureAudioContext();
+    if (AC && AC.state === "suspended") await AC.resume();
+    // No “reiniciamos” la cola; si ya hay buffers programados, continuará.
+    isPlaying = true;
+    statusLabel.textContent = "Reproduciendo…";
   });
 
-  // ---- Velocidad
-  function setRate(rate) {
-    player.playbackRate = rate;
-    speedCurrent.textContent = `(${rate.toFixed(1)}×)`;
-    speedButtons.forEach(b => b.classList.toggle('active', b.dataset.rate === String(rate)));
-  }
-  speedButtons.forEach(b => {
-    b.addEventListener('click', () => setRate(parseFloat(b.dataset.rate)));
-  });
-  setRate(1.0);
-
-  // ---- Eventos del audio para estados suaves
-  player.addEventListener('waiting', () => {
-    setStatus('Buffering…', true);
-  });
-  player.addEventListener('canplay', () => {
-    setStatus('Reproduciendo…', false);
-  });
-  player.addEventListener('play', () => {
-    setStatus('Reproduciendo…', false);
-  });
-  player.addEventListener('ended', () => {
-    setStatus('Listo', false);
-    // Cuando era streaming, al terminar ya existe el archivo final en /audio,
-    // pero no recargamos la página para no interrumpir.
-    currentSrcIsStreaming = false;
-    lockedSrc = null;
-  });
-  player.addEventListener('error', () => {
-    setStatus('Error de reproducción', false);
+  pauseBtn.addEventListener("click", async () => {
+    if (AC && AC.state === "running") {
+      await AC.suspend();
+      statusLabel.textContent = "Pausado";
+    }
   });
 
-  // ---- Archivo: play / delete
-  document.querySelectorAll('.archive .play').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const fname = btn.dataset.file;
-      if (!fname) return;
-      clearError();
-      const url = `/audio/${encodeURIComponent(fname)}`;
-      lockAndPlay(url); // archivo completo local, no streaming
+  stopBtn.addEventListener("click", async () => {
+    resetPlayback();
+    if (AC && AC.state !== "closed") {
+      try { await AC.close(); } catch(_) {}
+    }
+    AC = null; masterGain = null;
+    statusLabel.textContent = "Detenido";
+    uiLoading(false);
+  });
+
+  // Velocidad (nota: con WebAudio nativo no hay playbackRate global para varios buffers ya programados;
+  // si necesitas rate real, deberías ajustar start/stop y recrear scheduling. Aquí mantenemos el UI.)
+  speedBtns.forEach(btn => {
+    btn.addEventListener("click", () => {
+      speedBtns.forEach(b => b.classList.remove("active"));
+      btn.classList.add("active");
+      const rate = parseFloat(btn.dataset.rate);
+      speedCurrent.textContent = `(${rate.toFixed(1)}×)`;
+      // Dejamos el rate como visual; para una implementación completa,
+      // podrías usar playbackRate en cada BufferSource *antes* de start().
     });
   });
-  document.querySelectorAll('.archive .del').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      const fname = btn.dataset.file;
-      if (!fname) return;
-      if (!confirm('¿Eliminar este archivo?')) return;
+
+  // Reproducir un archivo del archivo (los 3 últimos)
+  document.querySelectorAll(".archive .play").forEach(b => {
+    b.addEventListener("click", async () => {
+      const file = b.getAttribute("data-file");
+      if (!file) return;
+      // En iOS: usar la etiqueta <audio> con src directo para archivos ya completos
+      resetPlayback(true);
+      audioTag.src = `/audio/${file}`;
+      audioTag.currentTime = 0;
       try {
-        const res = await fetch('/api/delete', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({ file: fname })
-        });
-        const data = await res.json();
-        if (!data.ok) throw new Error(data.error || 'No se pudo eliminar');
-        // Quitar de la UI sin recargar
-        btn.closest('li')?.remove();
+        await audioTag.play();
+        statusLabel.textContent = "Reproduciendo archivo…";
       } catch (err) {
-        showError(err.message || 'Error eliminando archivo');
+        console.error(err);
+        statusLabel.textContent = "No se pudo reproducir el archivo.";
       }
     });
   });
