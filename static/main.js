@@ -1,74 +1,54 @@
-const audio = document.getElementById('player');
-const form = document.getElementById('tts-form');
-const statusLabel = document.getElementById('status-label');
-const formError = document.getElementById('form-error');
-const spinner = document.getElementById('spinner');
-const progressWrap = document.getElementById('progress-wrap');
-const progressBar = document.getElementById('progress-bar');
+(() => {
+  const form = document.getElementById("tts-form");
+  const textEl = document.getElementById("text");
+  const langEl = document.getElementById("lang");
+  const player = document.getElementById("player");
+  const playerSection = document.getElementById("player-section");
+  const statusEl = document.getElementById("status");
+  const btn = document.getElementById("btn-generate");
 
-const speedBtns = Array.from(document.querySelectorAll('.speed-btn'));
-const speedCurrent = document.getElementById('speed-current');
+  const setStatus = (msg) => {
+    statusEl.textContent = msg || "";
+  };
 
-const SPEED_KEY = 'pando.playbackRate';
-let currentToken = null;
-let progressTimer = null;
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const txt = (textEl.value || "").trim();
+    const lang = (langEl.value || "es").trim();
 
-function setStatus(msg, muted = true) {
-  if (!statusLabel) return;
-  statusLabel.textContent = msg;
-  statusLabel.className = muted ? 'muted' : '';
-}
-function setSpinner(on) { if (spinner) spinner.style.display = on ? 'inline-block' : 'none'; }
-function setProgress(percent) {
-  if (!progressWrap || !progressBar) return;
-  progressWrap.style.display = percent >= 0 && percent < 100 ? 'block' : 'none';
-  progressBar.style.width = `${Math.max(0, Math.min(100, percent))}%`;
-}
-function setActiveSpeed(rate) {
-  speedBtns.forEach(b => b.classList.toggle('active', Number(b.dataset.rate) === Number(rate)));
-  if (speedCurrent) speedCurrent.textContent = `(${Number(rate).toFixed(1)}×)`;
-}
+    if (!txt) {
+      alert("Escribe algún texto primero.");
+      return;
+    }
+    btn.disabled = true;
+    setStatus("Generando audio...");
 
-function initSpeed() {
-  const saved = Number(localStorage.getItem(SPEED_KEY) || 'NaN');
-  if (audio && isFinite(saved) && saved > 0) {
-    audio.playbackRate = saved;
-    setActiveSpeed(saved);
-  } else {
-    setActiveSpeed(1.0);
-  }
-}
-initSpeed();
+    try {
+      // Añadimos un cache-buster para evitar 304 con audio viejo
+      const url = `/tts?text=${encodeURIComponent(txt)}&lang=${encodeURIComponent(lang)}&t=${Date.now()}`;
+      const res = await fetch(url, { cache: "no-store" });
 
-speedBtns.forEach(btn => {
-  btn.addEventListener('click', () => {
-    const rate = Number(btn.dataset.rate);
-    if (!audio || !isFinite(rate) || rate <= 0) return;
-    audio.playbackRate = rate;
-    localStorage.setItem(SPEED_KEY, String(rate));
-    setActiveSpeed(rate);
+      if (!res.ok) {
+        const reason = await res.text();
+        throw new Error(`HTTP ${res.status} - ${reason}`);
+      }
+
+      const blob = await res.blob();
+      if (blob.size === 0) {
+        throw new Error("El audio retornó 0 bytes.");
+      }
+
+      const objectURL = URL.createObjectURL(blob);
+      player.src = objectURL;
+      playerSection.classList.remove("hidden");
+      player.play().catch(() => {/* Autoplay puede fallar por permisos */});
+      setStatus("Listo ✅");
+    } catch (err) {
+      console.error(err);
+      setStatus(`Error: ${err.message}`);
+      alert(`No se pudo generar el audio:\n${err.message}`);
+    } finally {
+      btn.disabled = false;
+    }
   });
-});
-
-// Controles
-document.getElementById('play')?.addEventListener('click', async () => {
-  if (!audio?.src) return;
-  await audio.play().catch(() => {});
-  setStatus('Reproduciendo…', true);
-});
-document.getElementById('pause')?.addEventListener('click', () => {
-  if (!audio) return;
-  audio.pause();
-  setStatus('Pausado.', true);
-});
-document.getElementById('stop')?.addEventListener('click', () => {
-  if (!audio) return;
-  audio.pause();
-  audio.currentTime = 0;
-  setStatus('Detenido.', true);
-});
-
-// Estados nativos
-audio?.addEventListener('waiting', () => { setStatus('Buffereando…', false); setSpinner(true); });
-audio?.addEventListener('stalled', () => { setStatus('Buffereando…', false); setSpinner(true); });
-audio?.addEventListener
+})();

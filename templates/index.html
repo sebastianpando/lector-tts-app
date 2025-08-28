@@ -1,147 +1,53 @@
 <!doctype html>
 <html lang="es">
 <head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <title>PANDO DOGWALK</title>
-  <link rel="stylesheet" href="/static/style.css">
-  <style>
-    body {
-      background: linear-gradient(135deg, #0f172a, #1e293b);
-      color: #e2e8f0;
-      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
-      margin: 0; padding: 0;
-    }
-    header { text-align: center; padding: 20px 10px; }
-    pre.ascii {
-      font-family: monospace;
-      font-size: 16px;
-      line-height: 1.15em;
-      margin: 0 auto 10px;
-      display: inline-block;
-      background: linear-gradient(90deg, #3b82f6, #a855f7, #ec4899, #facc15);
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
-      text-shadow: 0 0 8px rgba(255,255,255,0.25);
-      white-space: pre;
-    }
-    section { padding: 20px; }
-    h2 { margin-top: 30px; }
-    .status { margin: 6px 0 12px; display:flex; align-items:center; gap:10px; }
-    .status .muted { color:#9aa1ac; }
-    .spinner {
-      width: 18px; height: 18px; border: 3px solid rgba(255,255,255,0.25);
-      border-top-color: #3b82f6; border-radius: 50%;
-      animation: spin 0.9s linear infinite; display:none;
-    }
-    @keyframes spin { to { transform: rotate(360deg); } }
-    .progress-wrap { width:100%; background:#1f2937; border-radius:10px; height:10px; overflow:hidden; display:none; }
-    .progress-bar { height:100%; width:0%; background:#3b82f6; transition: width .2s ease; }
-    .controls { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
-    .speed { display:flex; gap:6px; align-items:center; margin-left:8px; }
-    .speed-btn.active { outline: 2px solid #3b82f6; border-radius: 8px; }
-    footer {
-      margin-top: 40px;
-      text-align: center;
-      font-size: 14px;
-      color: #94a3b8;
-    }
-    footer strong { color: #facc15; }
-    .archive ul { list-style:none; padding:0; margin:0; display:grid; gap:8px; }
-    .archive li {
-      display:grid; grid-template-columns:auto 1fr auto; align-items:center; gap:10px;
-      padding:8px 10px; border:1px solid #2a2f3a; border-radius:10px; background:#141821;
-    }
-    .archive a { color:#9fb5ff; text-decoration:none; word-break:break-all; }
-    .archive .play { background:#16a34a; color:white; border:0; padding:6px 10px; border-radius:8px; }
-    .archive .del  { background:#ef4444; color:white; border:0; padding:6px 10px; border-radius:8px; }
-    .alert.error { background:#3a0e0e; border:1px solid #5e1a1a; padding:10px 12px; border-radius:10px; margin-top:8px; }
-    input, select, textarea, button { font: inherit; border-radius:10px; }
-    textarea, select { background:#141821; border:1px solid #2a2f3a; color:#e2e8f0; padding:10px 12px; }
-    button { background:#3b82f6; color:white; border:0; padding:10px 14px; font-weight:600; cursor:pointer; }
-    button:hover { filter:brightness(1.07); }
-    .player audio { width:100%; margin:8px 0; }
-  </style>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Lector TTS</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
   <header>
-    <pre class="ascii">
-PPPP    AAAA   N   N  DDDD    OOO
-P   P  A    A  NN  N  D   D  O   O
-PPPP   AAAAAA  N N N  D   D  O   O
-P      A    A  N  NN  D   D  O   O
-P      A    A  N   N  DDDD    OOO
-    </pre>
-    <p style="color:#94a3b8;">Lector en Inglés y Español TTS. Powered by Atlas 🐶</p>
+    <h1>🗣️ Lector TTS</h1>
+    <p>Escribe texto y genera audio con gTTS.</p>
   </header>
 
-  <section class="composer">
+  <main>
     <form id="tts-form">
       <label for="text">Texto</label>
-      <textarea id="text" name="text" rows="10" placeholder="Pega aquí tu texto…"></textarea>
+      <textarea id="text" name="text" rows="6" placeholder="Escribe aquí...">{{ text }}</textarea>
 
-      <div style="margin:10px 0; display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
-        <label for="lang" style="min-width:80px;">Idioma</label>
-        <select id="lang" name="lang">
-          <option value="es" selected>Español (20% más rápido)</option>
-          <option value="en">English</option>
-        </select>
+      <div class="row">
+        <div class="col">
+          <label for="lang">Idioma</label>
+          <select id="lang" name="lang">
+            <option value="es" {{ 'selected' if (lang or '') == 'es' else '' }}>Español (es)</option>
+            <option value="en" {{ 'selected' if (lang or '') == 'en' else '' }}>English (en)</option>
+            <option value="pt" {{ 'selected' if (lang or '') == 'pt' else '' }}>Português (pt)</option>
+            <option value="fr" {{ 'selected' if (lang or '') == 'fr' else '' }}>Français (fr)</option>
+          </select>
+        </div>
+        <div class="col right">
+          <button type="submit" id="btn-generate">Generar audio</button>
+        </div>
       </div>
-
-      <button type="submit">🔊 Reproducir ahora</button>
-      <div id="form-error" class="alert error" style="display:none;"></div>
     </form>
-  </section>
 
-  <section class="player">
-    <h2>Status de reproducción</h2>
-    <div class="status">
-      <div id="spinner" class="spinner"></div>
-      <span id="status-label" class="muted">Listo</span>
-    </div>
-    <div class="progress-wrap" id="progress-wrap">
-      <div class="progress-bar" id="progress-bar"></div>
-    </div>
+    <section id="player-section" class="hidden">
+      <h2>Resultado</h2>
+      <audio id="player" controls></audio>
+      <div id="status" class="status"></div>
+    </section>
 
-    <audio id="player" controls preload="auto"></audio>
-
-    <div class="controls">
-      <button id="play">▶️ Play</button>
-      <button id="pause">⏸ Pausa</button>
-      <button id="stop">⏹ Detener</button>
-
-      <div class="speed">
-        <span class="muted">Velocidad:</span>
-        <button type="button" class="speed-btn" data-rate="0.9">0.9×</button>
-        <button type="button" class="speed-btn" data-rate="1.0">1.0×</button>
-        <button type="button" class="speed-btn" data-rate="1.2">1.2×</button>
-        <button type="button" class="speed-btn" data-rate="1.4">1.4×</button>
-        <span id="speed-current" class="muted" style="margin-left:4px;">(1.0×)</span>
-      </div>
-    </div>
-  </section>
-
-  <section class="archive">
-    <h2>Lecturas anteriores</h2>
-    {% if items %}
+    <section class="help">
+      <h3>Uso rápido</h3>
       <ul>
-        {% for it in items %}
-        <li>
-          <button class="play" data-file="{{ it }}">▶</button>
-          <a href="/audio/{{ it }}">{{ it }}</a>
-          <button class="del" data-file="{{ it }}">🗑</button>
-        </li>
-        {% endfor %}
+        <li>Puedes llamar así: <code>/?text=Hola%20mundo&amp;lang=es</code></li>
+        <li>O usa el formulario y dale a “Generar audio”.</li>
       </ul>
-    {% else %}
-      <p class="muted">Aún no hay lecturas archivadas.</p>
-    {% endif %}
-  </section>
+    </section>
+  </main>
 
-  <footer>
-    <small><strong>Pandix lo hizo otra vez</strong> ✨</small>
-  </footer>
-
-  <script src="/static/main.js"></script>
+  <script src="{{ url_for('static', filename='main.js') }}"></script>
 </body>
 </html>

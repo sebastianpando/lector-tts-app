@@ -1,180 +1,59 @@
-import os
-import io
-import re
-import uuid
-import tempfile
-import shutil
-from datetime import datetime
-from flask import (
-    Flask, request, Response, render_template, abort,
-    send_from_directory, jsonify
-)
+from flask import Flask, request, render_template, make_response, abort
+from io import BytesIO
 from gtts import gTTS
 
-app = Flask(__name__)
+# Configuración correcta de rutas de estáticos y plantillas
+app = Flask(
+    __name__,
+    static_url_path="/static",
+    static_folder="static",
+    template_folder="templates"
+)
 
-ARCHIVE_DIR = os.path.join("static", "archive")
-os.makedirs(ARCHIVE_DIR, exist_ok=True)
+@app.after_request
+def add_secure_headers(resp):
+    # Un par de cabeceras útiles
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    return resp
 
-# Trabajo en memoria: token -> dict(title, text, lang, chunks, sent, done)
-JOBS = {}
-MAX_WORDS = 5000
-SPEED_SUGGESTED = {"es": 1.20, "en": 1.00}
-
-def slugify(s: str) -> str:
-    s = s.strip().lower()
-    s = re.sub(r"\s+", "-", s)
-    s = re.sub(r"[^a-z0-9\-]+", "", s)
-    return s[:60] or "lectura"
-
-def smart_split(text: str, first_max: int = 400, next_max: int = 3200):
-    """
-    Split 'fluido': primer chunk muy chico para arrancar rápido,
-    luego chunks grandes para throughput.
-    """
-    def split_with_limit(t: str, max_chars: int):
-        t = re.sub(r"\s+", " ", t).strip()
-        parts = []
-        while t:
-            if len(t) <= max_chars:
-                parts.append(t)
-                break
-            cut = -1
-            for sep in [". ", "… ", "?! ", "!? ", "; ", ": ", ", "]:
-                cut = t.rfind(sep, 0, max_chars)
-                if cut != -1:
-                    cut += len(sep)
-                    break
-            if cut == -1:
-                cut = max_chars
-            parts.append(t[:cut].strip())
-            t = t[cut:].strip()
-        return parts
-
-    text = re.sub(r"\s+", " ", text).strip()
-    if not text:
-        return []
-
-    # Primer tramo
-    if len(text) <= first_max:
-        return [text]
-
-    first = split_with_limit(text[:first_max], first_max)[0]
-    rest = text[len(first):].strip()
-    rest_parts = split_with_limit(rest, next_max)
-    return [first] + rest_parts
+def sanitize_text(s: str) -> str:
+    s = (s or "").strip()
+    # Recorta a 5000 chars para evitar abusos/errores
+    return s[:5000]
 
 @app.route("/", methods=["GET"])
 def index():
-    items = [f for f in os.listdir(ARCHIVE_DIR) if f.endswith(".mp3")]
-    items.sort(reverse=True)
-    return render_template("index.html", items=items)
+    text = request.args.get("text", "")
+    lang = request.args.get("lang", "es")
+    return render_template("index.html", text=text, lang=lang)
 
-@app.route("/api/prepare", methods=["POST"])
-def api_prepare():
-    data = request.get_json(silent=True) or {}
-    text = (data.get("text") or "").strip()
-    lang = (data.get("lang") or "es").strip().lower()
+@app.route("/tts", methods=["GET"])
+def tts():
+    text = sanitize_text(request.args.get("text", ""))
+    lang = (request.args.get("lang", "es") or "es").strip()
+
     if not text:
-        return {"ok": False, "error": "Texto vacío."}, 400
+        abort(400, description="Parámetro 'text' requerido")
 
-    words = len(re.findall(r"\b\w+\b", text))
-    if words > MAX_WORDS:
-        return {"ok": False, "error": f"Texto supera {MAX_WORDS} palabras ({words})."}, 400
+    try:
+        # gTTS genera un MP3 en memoria
+        tts_obj = gTTS(text=text, lang=lang)
+        buf = BytesIO()
+        tts_obj.write_to_fp(buf)
+        buf.seek(0)
 
-    if lang not in ("es", "en"):
-        lang = "es"
+        audio_bytes = buf.read()
+        resp = make_response(audio_bytes)
+        resp.headers["Content-Type"] = "audio/mpeg"
+        # Evita cachear audios por defecto (opcional)
+        resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        return resp
+    except Exception as e:
+        abort(500, description=f"Error generando TTS: {e}")
 
-    token = str(uuid.uuid4())
-    title = text[:40] + ("…" if len(text) > 40 else "")
-
-    chunks = smart_split(text, first_max=400, next_max=3200)
-    JOBS[token] = {
-        "title": title,
-        "text": text,
-        "lang": lang,
-        "chunks": chunks,
-        "sent": 0,
-        "done": False,
-    }
-
-    return {
-        "ok": True,
-        "token": token,
-        "title": title,
-        "lang": lang,
-        "speed_suggested": SPEED_SUGGESTED.get(lang, 1.0),
-        "total_chunks": len(chunks)
-    }
-
-@app.route("/api/progress")
-def api_progress():
-    token = request.args.get("token", "")
-    job = JOBS.get(token)
-    if not job:
-        return jsonify(ok=False, error="token no encontrado"), 404
-    total = max(1, len(job["chunks"]))
-    sent = job["sent"]
-    done = job["done"]
-    return jsonify(ok=True, sent=sent, total=total, done=done)
-
-@app.route("/stream")
-def stream():
-    token = request.args.get("token", "")
-    job = JOBS.get(token)
-    if not job:
-        abort(404)
-
-    title = job["title"]
-    lang = job["lang"]
-    chunks = job["chunks"]
-
-    tmp_fd, tmp_path = tempfile.mkstemp(suffix=".mp3")
-    os.close(tmp_fd)
-
-    def generate():
-        total = len(chunks)
-        for i, chunk in enumerate(chunks, start=1):
-            # gTTS genera MP3 en memoria
-            tts = gTTS(chunk, lang=lang)
-            buf = io.BytesIO()
-            tts.write_to_fp(buf)
-            mp3_bytes = buf.getvalue()
-
-            # Acumular para archivo final
-            with open(tmp_path, "ab") as out:
-                out.write(mp3_bytes)
-
-            # Progreso
-            job["sent"] = i
-
-            # Emitir al cliente
-            yield mp3_bytes
-
-        # Archivar
-        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        final_name = f"{stamp}_{slugify(title)}.mp3"
-        final_path = os.path.join(ARCHIVE_DIR, final_name)
-        shutil.move(tmp_path, final_path)
-        job["done"] = True
-
-    resp = Response(generate(), mimetype="audio/mpeg", direct_passthrough=True)
-    resp.headers["Cache-Control"] = "no-cache"
-    resp.headers["X-Accel-Buffering"] = "no"
-    return resp
-
-@app.route("/audio/<path:filename>")
-def audio(filename):
-    return send_from_directory(ARCHIVE_DIR, filename, as_attachment=False)
-
-@app.route("/api/delete", methods=["POST"])
-def api_delete():
-    fname = (request.json or {}).get("filename", "")
-    path = os.path.join(ARCHIVE_DIR, fname)
-    if os.path.isfile(path):
-        os.remove(path)
-        return jsonify(ok=True)
-    return jsonify(ok=False), 404
-
+# Punto de entrada local (Render usará gunicorn vía Procfile)
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8000, debug=False)
+    # Para pruebas locales:
+    #   pip install -r requirements.txt
+    #   python app.py
+    app.run(host="0.0.0.0", port=5000, debug=True)
