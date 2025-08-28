@@ -25,6 +25,10 @@
       text-shadow: 0 0 8px rgba(255,255,255,0.25);
       white-space: pre;
     }
+    section { padding: 20px; }
+    h2 { margin-top: 30px; }
+    .status { margin: 6px 0 8px; }
+    .status .muted { color:#9aa1ac; }
     footer {
       margin-top: 40px;
       text-align: center;
@@ -32,10 +36,6 @@
       color: #94a3b8;
     }
     footer strong { color: #facc15; }
-    section { padding: 20px; }
-    h2 { margin-top: 30px; }
-    .status { margin: 6px 0 8px; }
-    .status .muted { color:#9aa1ac; }
   </style>
 </head>
 <body>
@@ -47,14 +47,11 @@ PPPP   AAAAAA  N N N  D   D  O   O
 P      A    A  N  NN  D   D  O   O
 P      A    A  N   N  DDDD    OOO
     </pre>
-    <p style="color:#94a3b8;">Tu lector TTS para pasear con Atlas 🐶</p>
+    <p style="color:#94a3b8;">Lector en Inglés y Español TTS. Powered by Atlas</p>
   </header>
 
   <section class="composer">
     <form id="tts-form">
-      <label for="title">Título (opcional)</label>
-      <input id="title" name="title" type="text" placeholder="Ej: Cap. 1 - Lean Startup" value="{{ title or '' }}"/>
-
       <label for="text">Texto</label>
       <textarea id="text" name="text" rows="10" placeholder="Pega aquí tu texto…"></textarea>
 
@@ -64,15 +61,13 @@ P      A    A  N   N  DDDD    OOO
   </section>
 
   <section class="player">
-    <h2>Reproductor</h2>
+    <h2>Maneja tu reproducción</h2>
     <div class="status"><span id="status-label" class="muted">Listo</span></div>
     <audio id="player" controls preload="auto"></audio>
     <div class="controls">
-      <button id="back30">⏪ 30s</button>
-      <button id="fwd30">⏩ 30s</button>
-      <button id="stop">⏹ Detener</button>
       <button id="play">▶️ Play</button>
       <button id="pause">⏸ Pausa</button>
+      <button id="stop">⏹ Detener</button>
     </div>
   </section>
 
@@ -100,3 +95,4 @@ P      A    A  N   N  DDDD    OOO
   <script src="/static/main.js"></script>
 </body>
 </html>
+
