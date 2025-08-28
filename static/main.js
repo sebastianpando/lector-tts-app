@@ -1,259 +1,161 @@
+// main.js
 (() => {
-  const $ = (sel) => document.querySelector(sel);
-  const $$ = (sel) => Array.from(document.querySelectorAll(sel));
+  const form = document.getElementById('tts-form');
+  const txt = document.getElementById('text');
+  const langSel = document.getElementById('lang');
+  const player = document.getElementById('player');
+  const spinner = document.getElementById('spinner');
+  const statusLabel = document.getElementById('status-label');
+  const formError = document.getElementById('form-error');
+  const submitBtn = document.getElementById('submit-btn');
 
-  const form = $("#tts-form");
-  const textarea = $("#text");
-  const langSel = $("#lang");
-  const errBox = $("#form-error");
+  const btnPlay = document.getElementById('play');
+  const btnPause = document.getElementById('pause');
+  const btnStop = document.getElementById('stop');
 
-  const spinner = $("#spinner");
-  const statusLabel = $("#status-label");
-  const progressWrap = $("#progress-wrap");
-  const progressBar = $("#progress-bar");
+  const speedButtons = Array.from(document.querySelectorAll('.speed-btn'));
+  const speedCurrent = document.getElementById('speed-current');
 
-  const player = $("#player");
-  const btnPlay = $("#play");
-  const btnPause = $("#pause");
-  const btnStop = $("#stop");
-  const speedBtns = $$(".speed-btn");
-  const speedCurrent = $("#speed-current");
+  let currentSrcIsStreaming = false;
+  let lockedSrc = null; // Para no “resetear” el audio en mitad de la reproducción
 
-  const archiveList = $("#archive-list");
-  const noArchive = $("#no-archive");
-
-  let lastObjectUrl = null;
-  let fakeProgressTimer = null;
-
-  function setStatus(text) {
-    statusLabel.textContent = text;
-  }
-
-  function showSpinner(show) {
-    spinner.style.display = show ? "inline-block" : "none";
-  }
-
-  function resetProgress() {
-    progressBar.style.width = "0%";
-  }
-
-  function showProgress(show) {
-    progressWrap.style.display = show ? "block" : "none";
-  }
-
-  function startFakeProgress() {
-    // Progreso “indefinido” si no hay Content-Length
-    let w = 0;
-    clearInterval(fakeProgressTimer);
-    fakeProgressTimer = setInterval(() => {
-      w = Math.min(90, w + Math.random() * 5 + 1);
-      progressBar.style.width = w.toFixed(0) + "%";
-    }, 120);
-  }
-
-  function stopFakeProgress() {
-    clearInterval(fakeProgressTimer);
-    fakeProgressTimer = null;
-  }
-
-  function clearError() {
-    errBox.style.display = "none";
-    errBox.textContent = "";
+  function setStatus(msg, spinning = false) {
+    statusLabel.textContent = msg;
+    spinner.style.display = spinning ? 'inline-block' : 'none';
   }
 
   function showError(msg) {
-    errBox.textContent = "⚠️ " + msg;
-    errBox.style.display = "block";
+    formError.textContent = msg;
+    formError.style.display = 'block';
+  }
+  function clearError() {
+    formError.textContent = '';
+    formError.style.display = 'none';
   }
 
-  function revokeLastUrl() {
-    if (lastObjectUrl) {
-      URL.revokeObjectURL(lastObjectUrl);
-      lastObjectUrl = null;
-    }
+  function lockAndPlay(src) {
+    // Evitar reinicios: seteamos src UNA sola vez por ciclo
+    if (lockedSrc === src) return;
+    lockedSrc = src;
+    player.src = src;
+    currentSrcIsStreaming = src.startsWith('/stream/');
+    player.play().catch(() => {});
   }
 
-  function setPlaybackRate(rate) {
-    player.playbackRate = rate;
-    speedBtns.forEach(b => b.classList.toggle("active", b.dataset.rate === String(rate)));
-    speedCurrent.textContent = `(${rate.toFixed(1)}×)`;
-  }
-
-  function addArchiveItem(filename) {
-    if (!filename) return;
-    if (noArchive && noArchive.style.display !== "none") {
-      noArchive.style.display = "none";
-      archiveList.style.display = "";
-    }
-    const li = document.createElement("li");
-    li.innerHTML = `
-      <button class="play" data-file="${filename}">▶</button>
-      <a href="/audio/${filename}">${filename}</a>
-      <button class="del" data-file="${filename}">🗑</button>
-    `;
-    // Insertar arriba (más reciente primero)
-    if (archiveList.firstChild) archiveList.prepend(li);
-    else archiveList.appendChild(li);
-  }
-
-  async function fetchAndPlay(text, lang) {
-    clearError();
-    setStatus("Generando audio…");
-    showSpinner(true);
-    showProgress(true);
-    resetProgress();
-
-    let body = JSON.stringify({ text, lang });
-
-    let res;
-    try {
-      res = await fetch("/api/tts", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body,
-      });
-    } catch (e) {
-      showSpinner(false);
-      showProgress(false);
-      return showError("No se pudo conectar con el servidor.");
-    }
-
-    if (!res.ok) {
-      // intentar extraer JSON de error
-      let msg = "Error al generar audio.";
-      try {
-        const j = await res.json();
-        if (j && j.error) msg = j.error;
-      } catch {}
-      showSpinner(false);
-      showProgress(false);
-      return showError(msg);
-    }
-
-    const total = parseInt(res.headers.get("Content-Length") || "0", 10);
-    const filename = res.headers.get("X-Filename") || "";
-
-    const reader = res.body.getReader();
-    const chunks = [];
-    let received = 0;
-
-    if (!total) startFakeProgress();
-
-    try {
-      // Leer flujo y actualizar progreso
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        chunks.push(value);
-        received += value.length;
-        if (total) {
-          const pct = Math.max(1, Math.min(100, Math.floor((received / total) * 100)));
-          progressBar.style.width = pct + "%";
-        }
-      }
-    } catch (e) {
-      stopFakeProgress();
-      showSpinner(false);
-      setStatus("Error en la descarga.");
-      return showError("Se interrumpió la descarga del audio.");
-    }
-
-    stopFakeProgress();
-    progressBar.style.width = "100%";
-    setStatus("Listo ✓");
-    showSpinner(false);
-
-    const blob = new Blob(chunks, { type: "audio/mpeg" });
-    revokeLastUrl();
-    const url = URL.createObjectURL(blob);
-    lastObjectUrl = url;
-    player.src = url;
-
-    // Auto-ajustar velocidad por idioma si quieres (ej.: ES un poco más rápido)
-    if ((lang || "").startsWith("es")) {
-      setPlaybackRate(1.2);
-    } else {
-      setPlaybackRate(1.0);
-    }
-
-    try {
-      await player.play();
-    } catch {
-      // El usuario quizás requiere interacción previa
-    }
-
-    // Añadir al archivo local (UI)
-    if (filename) addArchiveItem(filename);
-
-    // Ocultar barra tras un momento
-    setTimeout(() => showProgress(false), 600);
-  }
-
-  // Eventos UI
-  form?.addEventListener("submit", (e) => {
+  // ---- Form submit: cache text y apuntar <audio> al stream
+  form.addEventListener('submit', async (e) => {
     e.preventDefault();
-    const text = (textarea.value || "").trim();
-    const lang = langSel.value || "es";
+    clearError();
+
+    const text = (txt.value || '').trim();
+    const lang = langSel.value || 'es';
     if (!text) {
-      return showError("Por favor, pega algún texto.");
+      showError('Por favor, pega algún texto.');
+      return;
     }
-    fetchAndPlay(text, lang);
+
+    setStatus('Preparando stream…', true);
+    submitBtn.disabled = true;
+
+    try {
+      const res = await fetch('/api/cache-text', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ text, lang })
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) {
+        throw new Error(data.error || 'Error preparando el streaming.');
+      }
+
+      const token = data.token;
+      const streamUrl = `/stream/${token}`;
+
+      // Importante: seteamos src una SOLA vez y reproducimos (stream empieza al tiro)
+      lockAndPlay(streamUrl);
+      setStatus('Cargando audio…', true);
+
+    } catch (err) {
+      console.error(err);
+      showError(err.message || 'Error inesperado.');
+      setStatus('Listo', false);
+    } finally {
+      submitBtn.disabled = false;
+    }
   });
 
-  btnPlay?.addEventListener("click", () => {
+  // ---- Controles de player
+  btnPlay.addEventListener('click', () => {
     player.play().catch(() => {});
   });
-  btnPause?.addEventListener("click", () => player.pause());
-  btnStop?.addEventListener("click", () => {
+  btnPause.addEventListener('click', () => {
+    player.pause();
+  });
+  btnStop.addEventListener('click', () => {
     player.pause();
     player.currentTime = 0;
   });
 
-  speedBtns.forEach((b) => {
-    b.addEventListener("click", () => {
-      const rate = parseFloat(b.dataset.rate || "1");
-      setPlaybackRate(rate);
+  // ---- Velocidad
+  function setRate(rate) {
+    player.playbackRate = rate;
+    speedCurrent.textContent = `(${rate.toFixed(1)}×)`;
+    speedButtons.forEach(b => b.classList.toggle('active', b.dataset.rate === String(rate)));
+  }
+  speedButtons.forEach(b => {
+    b.addEventListener('click', () => setRate(parseFloat(b.dataset.rate)));
+  });
+  setRate(1.0);
+
+  // ---- Eventos del audio para estados suaves
+  player.addEventListener('waiting', () => {
+    setStatus('Buffering…', true);
+  });
+  player.addEventListener('canplay', () => {
+    setStatus('Reproduciendo…', false);
+  });
+  player.addEventListener('play', () => {
+    setStatus('Reproduciendo…', false);
+  });
+  player.addEventListener('ended', () => {
+    setStatus('Listo', false);
+    // Cuando era streaming, al terminar ya existe el archivo final en /audio,
+    // pero no recargamos la página para no interrumpir.
+    currentSrcIsStreaming = false;
+    lockedSrc = null;
+  });
+  player.addEventListener('error', () => {
+    setStatus('Error de reproducción', false);
+  });
+
+  // ---- Archivo: play / delete
+  document.querySelectorAll('.archive .play').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const fname = btn.dataset.file;
+      if (!fname) return;
+      clearError();
+      const url = `/audio/${encodeURIComponent(fname)}`;
+      lockAndPlay(url); // archivo completo local, no streaming
     });
   });
-
-  // Delegación para botones de archivo (play/delete)
-  archiveList?.addEventListener("click", async (e) => {
-    const target = e.target.closest("button");
-    if (!target) return;
-
-    const file = target.getAttribute("data-file");
-    if (!file) return;
-
-    if (target.classList.contains("play")) {
-      revokeLastUrl();
-      player.src = `/audio/${encodeURIComponent(file)}`;
-      player.play().catch(() => {});
-    } else if (target.classList.contains("del")) {
-      if (!confirm("¿Eliminar este audio?")) return;
+  document.querySelectorAll('.archive .del').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const fname = btn.dataset.file;
+      if (!fname) return;
+      if (!confirm('¿Eliminar este archivo?')) return;
       try {
-        const res = await fetch("/api/delete", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ file }),
+        const res = await fetch('/api/delete', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ file: fname })
         });
-        const j = await res.json();
-        if (!j.ok) throw new Error(j.error || "No se pudo eliminar.");
-        // quitar del DOM
-        target.closest("li")?.remove();
-        if (!archiveList.querySelector("li")) {
-          if (noArchive) {
-            noArchive.style.display = "";
-            archiveList.style.display = "none";
-          }
-        }
+        const data = await res.json();
+        if (!data.ok) throw new Error(data.error || 'No se pudo eliminar');
+        // Quitar de la UI sin recargar
+        btn.closest('li')?.remove();
       } catch (err) {
-        showError(err.message || "No se pudo eliminar el archivo.");
+        showError(err.message || 'Error eliminando archivo');
       }
-    }
+    });
   });
-
-  // Estado inicial
-  setPlaybackRate(1.0);
-  clearError();
-  setStatus("Listo");
 })();

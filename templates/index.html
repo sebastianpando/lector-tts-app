@@ -57,7 +57,7 @@
     .archive .del  { background:#ef4444; color:white; border:0; padding:6px 10px; border-radius:8px; }
     .alert.error { background:#3a0e0e; border:1px solid #5e1a1a; padding:10px 12px; border-radius:10px; margin-top:8px; }
     input, select, textarea, button { font: inherit; border-radius:10px; }
-    textarea, select { background:#141821; border:1px solid #2a2f3a; color:#e2e8f0; padding:10px 12px; width:100%; }
+    textarea, select { background:#141821; border:1px solid #2a2f3a; color:#e2e8f0; padding:10px 12px; }
     button { background:#3b82f6; color:white; border:0; padding:10px 14px; font-weight:600; cursor:pointer; }
     button:hover { filter:brightness(1.07); }
     .player audio { width:100%; margin:8px 0; }
@@ -88,7 +88,7 @@ P      A    A  N   N  DDDD    OOO
         </select>
       </div>
 
-      <button type="submit">🔊 Reproducir ahora</button>
+      <button type="submit" id="submit-btn">🔊 Escuchar ahora</button>
       <div id="form-error" class="alert error" style="display:none;"></div>
     </form>
   </section>
@@ -139,216 +139,9 @@ P      A    A  N   N  DDDD    OOO
   </section>
 
   <footer>
-    <small><strong>Pandix lo hizo otra vez</strong> ✨</small>
+    <small><strong>Un script desarrollado por Pando</strong> ✨</small>
   </footer>
 
-  <!-- Intenta usar /static/main.js si existe; si está vacío o falla, este script embebido se encarga -->
-  <script>
-    (function(){
-      if (window.__ttsAppReady) return; // evita doble init si /static/main.js funciona
-      const $ = (sel) => document.querySelector(sel);
-
-      const form = $('#tts-form');
-      const txt  = $('#text');
-      const lang = $('#lang');
-      const err  = $('#form-error');
-
-      const player = $('#player');
-      const playBtn = $('#play');
-      const pauseBtn = $('#pause');
-      const stopBtn = $('#stop');
-
-      const spinner = $('#spinner');
-      const statusLabel = $('#status-label');
-      const pw = $('#progress-wrap');
-      const pb = $('#progress-bar');
-      const speedBtns = document.querySelectorAll('.speed-btn');
-      const speedCurrent = $('#speed-current');
-
-      let objectURL = null;
-
-      function setStatus(s, busy=false) {
-        statusLabel.textContent = s;
-        spinner.style.display = busy ? 'inline-block' : 'none';
-      }
-
-      function showError(message) {
-        err.textContent = message || 'Algo salió mal.';
-        err.style.display = 'block';
-      }
-      function hideError() { err.style.display = 'none'; }
-
-      function resetProgress() {
-        pw.style.display = 'none';
-        pb.style.width = '0%';
-      }
-
-      function updateProgress() {
-        if (!isFinite(player.duration) || player.duration <= 0) return;
-        const pct = (player.currentTime / player.duration) * 100;
-        pw.style.display = 'block';
-        pb.style.width = Math.min(100, pct) + '%';
-      }
-
-      player.addEventListener('timeupdate', updateProgress);
-      player.addEventListener('ended', resetProgress);
-      player.addEventListener('loadedmetadata', updateProgress);
-
-      playBtn.addEventListener('click', () => player.play());
-      pauseBtn.addEventListener('click', () => player.pause());
-      stopBtn.addEventListener('click', () => { player.pause(); player.currentTime = 0; });
-
-      speedBtns.forEach(btn => {
-        btn.addEventListener('click', () => {
-          speedBtns.forEach(b => b.classList.remove('active'));
-          btn.classList.add('active');
-          const rate = parseFloat(btn.dataset.rate || '1.0');
-          player.playbackRate = rate;
-          speedCurrent.textContent = `(${rate.toFixed(1)}×)`;
-        });
-      });
-      // Preseleccionar 1.0x
-      const def = Array.from(speedBtns).find(b => b.dataset.rate === '1.0');
-      if (def) def.classList.add('active');
-
-      // --------- TTS: detección de endpoint y solicitud ----------
-      async function fetchTTSBlob(text, lang) {
-        const candidates = [
-          // 1) JSON POST típico
-          async () => {
-            const r = await fetch('/api/tts', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json', 'Accept': 'audio/*' },
-              body: JSON.stringify({ text, lang })
-            });
-            if (!r.ok) throw new Error('api/tts no ok');
-            const ct = r.headers.get('content-type') || '';
-            if (!ct.startsWith('audio/')) throw new Error('api/tts no audio');
-            return await r.blob();
-          },
-          // 2) GET /tts?text=&lang=
-          async () => {
-            const u = `/tts?text=${encodeURIComponent(text)}&lang=${encodeURIComponent(lang)}`;
-            const r = await fetch(u, { headers: { 'Accept': 'audio/*' } });
-            if (!r.ok) throw new Error('/tts no ok');
-            const ct = r.headers.get('content-type') || '';
-            if (!ct.startsWith('audio/')) throw new Error('/tts no audio');
-            return await r.blob();
-          },
-          // 3) GET /speak?text=&lang=
-          async () => {
-            const u = `/speak?text=${encodeURIComponent(text)}&lang=${encodeURIComponent(lang)}`;
-            const r = await fetch(u, { headers: { 'Accept': 'audio/*' } });
-            if (!r.ok) throw new Error('/speak no ok');
-            const ct = r.headers.get('content-type') || '';
-            if (!ct.startsWith('audio/')) throw new Error('/speak no audio');
-            return await r.blob();
-          },
-          // 4) GET /?text=&lang=  (el que aparece en tus logs antiguos)
-          async () => {
-            const u = `/?text=${encodeURIComponent(text)}&lang=${encodeURIComponent(lang)}`;
-            const r = await fetch(u, { headers: { 'Accept': 'audio/*' } });
-            if (!r.ok) throw new Error('/?text no ok');
-            const ct = r.headers.get('content-type') || '';
-            if (!ct.startsWith('audio/')) throw new Error('/?text no audio');
-            return await r.blob();
-          },
-        ];
-
-        let lastErr = null;
-        for (const attempt of candidates) {
-          try {
-            return await attempt();
-          } catch (e) {
-            lastErr = e;
-            // continúa con el siguiente candidato
-          }
-        }
-        throw lastErr || new Error('No se encontró endpoint de TTS disponible.');
-      }
-
-      async function handleSubmit(e) {
-        e.preventDefault();
-        hideError();
-        const text = (txt.value || '').trim();
-        const lng  = lang.value || 'es';
-        if (!text) { showError('Escribe o pega un texto.'); return; }
-
-        setStatus('Generando audio…', true);
-        resetProgress();
-
-        try {
-          const blob = await fetchTTSBlob(text, lng);
-
-          // libera URL anterior si existe
-          if (objectURL) { URL.revokeObjectURL(objectURL); objectURL = null; }
-          objectURL = URL.createObjectURL(blob);
-
-          player.src = objectURL;
-          await player.play();
-          setStatus('Reproduciendo');
-        } catch (e) {
-          console.error(e);
-          showError('No pude generar el audio. Verifica que el servidor exponga /api/tts, /tts, /speak o "/?text=&lang=".');
-          setStatus('Error');
-        } finally {
-          spinner.style.display = 'none';
-        }
-      }
-
-      form.addEventListener('submit', handleSubmit);
-
-      // --------- Archivo: reproducir / borrar ----------
-      document.addEventListener('click', async (ev) => {
-        // Play archivo guardado
-        if (ev.target && ev.target.matches('.archive .play')) {
-          const f = ev.target.getAttribute('data-file');
-          if (!f) return;
-          hideError();
-          resetProgress();
-          setStatus('Cargando audio archivado…', true);
-          try {
-            const r = await fetch(`/audio/${encodeURIComponent(f)}`);
-            if (!r.ok) throw new Error('No se pudo leer el archivo');
-            const blob = await r.blob();
-            if (objectURL) { URL.revokeObjectURL(objectURL); objectURL = null; }
-            objectURL = URL.createObjectURL(blob);
-            player.src = objectURL;
-            await player.play();
-            setStatus('Reproduciendo');
-          } catch (e) {
-            console.error(e);
-            showError('No pude reproducir el archivo.');
-            setStatus('Error');
-          } finally {
-            spinner.style.display = 'none';
-          }
-        }
-
-        // Borrar archivo guardado
-        if (ev.target && ev.target.matches('.archive .del')) {
-          const f = ev.target.getAttribute('data-file');
-          if (!f) return;
-          if (!confirm(`¿Eliminar "${f}"?`)) return;
-          try {
-            const r = await fetch(`/audio/${encodeURIComponent(f)}`, { method: 'DELETE' });
-            if (!r.ok) throw new Error('DELETE no ok');
-            // Quitar el <li> del DOM
-            const li = ev.target.closest('li');
-            if (li) li.remove();
-          } catch (e) {
-            console.error(e);
-            showError('No pude eliminar el archivo.');
-          }
-        }
-      });
-
-      window.__ttsAppReady = true;
-      console.log('TTS UI lista (inline).');
-    })();
-  </script>
-
-  <!-- Si tu /static/main.js está bien cargado, también puede inicializar; este inline evita quedarte sin JS -->
   <script src="/static/main.js"></script>
 </body>
 </html>
