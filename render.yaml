@@ -4,7 +4,9 @@ services:
     env: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app --workers 2 --threads 4 --timeout 120
+    # 1 worker para que el CACHE en memoria no se rompa.
+    # Más threads y mayor timeout para streams largos y iOS.
+    startCommand: gunicorn app:app --workers 1 --threads 8 --timeout 300 --graceful-timeout 300
     autoDeploy: true
     envVars:
       - key: PYTHONUNBUFFERED

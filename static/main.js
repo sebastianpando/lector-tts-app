@@ -1,3 +1,7 @@
+<<<<<<< HEAD
+=======
+// static/main.js
+>>>>>>> 423cd10 (Fix iOS playback + playbackRate; prebuffer; no-store; CSRF; RL; workers=1)
 (() => {
   const form = document.getElementById("tts-form");
   const textEl = document.getElementById("text");
@@ -16,6 +20,7 @@
   const speedBtns = document.querySelectorAll(".speed-btn");
   const speedCurrent = document.getElementById("speed-current");
 
+<<<<<<< HEAD
   // --- Estado de reproducción segmentada ---
   let AC = null;                 // AudioContext
   let masterGain = null;         // GainNode para controlar volumen / rate emulado si quisieras
@@ -160,12 +165,72 @@
     errorEl.style.display = "none";
     const text = (textEl.value || "").trim();
     const lang = langEl.value || "es";
+=======
+  // iOS detection básica
+  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+
+  // Afinar pitch para que playbackRate sea más “natural”
+  try {
+    if ('preservesPitch' in player) player.preservesPitch = false;
+    if ('mozPreservesPitch' in player) player.mozPreservesPitch = false;
+    if ('webkitPreservesPitch' in player) player.webkitPreservesPitch = false;
+  } catch (_) {}
+
+  let lockedSrc = null; // evitar resets del audio
+
+  function setStatus(msg, spinning = false) {
+    if (statusLabel) statusLabel.textContent = msg;
+    if (spinner) spinner.style.display = spinning ? 'inline-block' : 'none';
+  }
+
+  function showError(msg) {
+    if (!formError) return;
+    formError.textContent = msg;
+    formError.style.display = 'block';
+  }
+  function clearError() {
+    if (!formError) return;
+    formError.textContent = '';
+    formError.style.display = 'none';
+  }
+
+  function safePlay() {
+    // iOS exige gesto; aquí ya venimos de un submit/click, por eso debería permitirlo
+    return player.play().catch(() => {});
+  }
+
+  function lockAndPlay(src) {
+    if (!player) return;
+    if (lockedSrc === src) return;
+    lockedSrc = src;
+    player.pause();
+    player.src = src;
+    // iOS suele requerir load() explícito antes del play en streams
+    if (isIOS) player.load();
+    safePlay();
+  }
+
+  // Leer cookie para CSRF
+  function getCookie(name) {
+    const m = document.cookie.match(new RegExp('(?:^|; )' + name.replace(/([.$?*|{}()\\[\\]\\\\/+^])/g, '\\$1') + '=([^;]*)'));
+    return m ? decodeURIComponent(m[1]) : '';
+  }
+
+  // ---- Submit: prepara stream
+  form?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    clearError();
+
+    const text = (txt?.value || '').trim();
+    const lang = langSel?.value || 'es';
+>>>>>>> 423cd10 (Fix iOS playback + playbackRate; prebuffer; no-store; CSRF; RL; workers=1)
     if (!text) {
       errorEl.textContent = "Por favor pega algún texto.";
       errorEl.style.display = "block";
       return;
     }
 
+<<<<<<< HEAD
     try {
       await ensureAudioContext(); // gesto del usuario
       await startStreamingPlayback(text, lang);
@@ -227,6 +292,100 @@
       try {
         await audioTag.play();
         statusLabel.textContent = "Reproduciendo archivo…";
+=======
+    setStatus('Preparando stream…', true);
+    if (submitBtn) submitBtn.disabled = true;
+
+    try {
+      const res = await fetch('/api/cache-text', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ text, lang })
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) {
+        throw new Error(data.error || 'Error preparando el streaming.');
+      }
+      const token = data.token;
+      const streamUrl = `/stream/${token}`;
+      lockAndPlay(streamUrl);
+      setStatus('Cargando audio…', true);
+    } catch (err) {
+      console.error(err);
+      showError(err.message || 'Error inesperado.');
+      setStatus('Listo', false);
+    } finally {
+      if (submitBtn) submitBtn.disabled = false;
+    }
+  });
+
+  // ---- Controles
+  btnPlay?.addEventListener('click', () => safePlay());
+  btnPause?.addEventListener('click', () => player?.pause());
+  btnStop?.addEventListener('click', () => {
+    if (!player) return;
+    player.pause();
+    player.currentTime = 0;
+  });
+
+  // ---- Velocidad
+  function setRate(rate) {
+    if (!player) return;
+    player.defaultPlaybackRate = rate;
+    player.playbackRate = rate;
+    if (speedCurrent) speedCurrent.textContent = `(${rate.toFixed(1)}×)`;
+    speedButtons.forEach(b => b.classList.toggle('active', b.dataset.rate === String(rate)));
+
+    // Safari/iOS a veces ignora el cambio hasta reanudar
+    if (isIOS && player.paused === false) {
+      player.pause();
+      // pequeño timeout para que aplique el nuevo rate antes de reanudar
+      setTimeout(() => { safePlay(); }, 10);
+    }
+  }
+  speedButtons.forEach(b => b.addEventListener('click', () => setRate(parseFloat(b.dataset.rate))));
+  setRate(1.0);
+
+  // ---- Eventos para estados
+  player?.addEventListener('waiting', () => setStatus('Buffering…', true));
+  player?.addEventListener('canplay', () => setStatus('Reproduciendo…', false));
+  player?.addEventListener('play', () => setStatus('Reproduciendo…', false));
+  player?.addEventListener('ended', () => {
+    setStatus('Listo', false);
+    lockedSrc = null;
+  });
+  player?.addEventListener('error', () => setStatus('Error de reproducción', false));
+
+  // ---- Archivo: play / delete
+  document.querySelectorAll('.archive .play').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const fname = btn.dataset.file;
+      if (!fname) return;
+      clearError();
+      const url = `/audio/${encodeURIComponent(fname)}`;
+      lockAndPlay(url);
+    });
+  });
+
+  document.querySelectorAll('.archive .del').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const fname = btn.dataset.file;
+      if (!fname) return;
+      if (!confirm('¿Eliminar este archivo?')) return;
+      try {
+        const csrf = getCookie('csrf_token');
+        const res = await fetch('/api/delete', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-CSRF-Token': csrf
+          },
+          body: JSON.stringify({ file: fname })
+        });
+        const data = await res.json();
+        if (!data.ok) throw new Error(data.error || 'No se pudo eliminar');
+        btn.closest('li')?.remove();
+>>>>>>> 423cd10 (Fix iOS playback + playbackRate; prebuffer; no-store; CSRF; RL; workers=1)
       } catch (err) {
         console.error(err);
         statusLabel.textContent = "No se pudo reproducir el archivo.";
